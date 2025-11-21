@@ -18,12 +18,11 @@ import { In } from '@n8n/typeorm';
 import type { QueryDeepPartialEntity } from '@n8n/typeorm/query-builder/QueryPartialEntity';
 import omit from 'lodash/omit';
 import pick from 'lodash/pick';
-import { BinaryDataService } from 'n8n-core';
+import { FileLocation, BinaryDataService } from 'n8n-core';
 import { NodeApiError, PROJECT_ROOT } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
 import { ActiveWorkflowManager } from '@/active-workflow-manager';
-import config from '@/config';
 import { FolderNotFoundError } from '@/errors/folder-not-found.error';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
@@ -40,7 +39,7 @@ import { TagService } from '@/services/tag.service';
 import * as WorkflowHelpers from '@/workflow-helpers';
 
 import { WorkflowFinderService } from './workflow-finder.service';
-import { WorkflowHistoryService } from './workflow-history.ee/workflow-history.service.ee';
+import { WorkflowHistoryService } from './workflow-history/workflow-history.service';
 import { WorkflowSharingService } from './workflow-sharing.service';
 
 @Service()
@@ -206,9 +205,12 @@ export class WorkflowService {
 		parentFolderId?: string,
 		forceSave?: boolean,
 	): Promise<WorkflowEntity> {
-		const workflow = await this.workflowFinderService.findWorkflowForUser(workflowId, user, [
-			'workflow:update',
-		]);
+		const workflow = await this.workflowFinderService.findWorkflowForUser(
+			workflowId,
+			user,
+			['workflow:update'],
+			{ includeActiveVersion: true },
+		);
 
 		if (!workflow) {
 			this.logger.warn('User attempted to update a workflow without permissions', {
@@ -231,9 +233,15 @@ export class WorkflowService {
 			);
 		}
 
-		if (Object.keys(omit(workflowUpdateData, ['id', 'versionId', 'active'])).length > 0) {
+		if (
+			Object.keys(omit(workflowUpdateData, ['id', 'versionId', 'active', 'activeVersionId']))
+				.length > 0
+		) {
 			// Update the workflow's version when changing properties such as
 			// `name`, `pinData`, `nodes`, `connections`, `settings` or `tags`
+			// This is necessary for collaboration to work properly - even when only name or settings
+			// change, we need to update the version to detect conflicts when multiple users are editing.
+
 			workflowUpdateData.versionId = uuid();
 			this.logger.debug(
 				`Updating versionId for workflow ${workflowId} for user ${user.id} after saving`,
@@ -242,6 +250,28 @@ export class WorkflowService {
 					newVersionId: workflowUpdateData.versionId,
 				},
 			);
+		}
+
+		// Convert 'active' boolean from frontend to 'activeVersionId' for backend
+		if ('active' in workflowUpdateData) {
+			if (workflowUpdateData.active) {
+				workflowUpdateData.activeVersionId = workflowUpdateData.versionId ?? workflow.versionId;
+			} else {
+				workflowUpdateData.activeVersionId = null;
+			}
+		}
+
+		const versionChanged =
+			workflowUpdateData.versionId && workflowUpdateData.versionId !== workflow.versionId;
+		const wasActive = workflow.activeVersionId !== null;
+		const isNowActive = workflowUpdateData.active ?? wasActive;
+		const activationStatusChanged = isNowActive !== wasActive;
+		const needsActiveVersionUpdate = activationStatusChanged || (versionChanged && isNowActive);
+
+		if (versionChanged) {
+			// To save a version, we need both nodes and connections
+			workflowUpdateData.nodes = workflowUpdateData.nodes ?? workflow.nodes;
+			workflowUpdateData.connections = workflowUpdateData.connections ?? workflow.connections;
 		}
 
 		// check credentials for old format
@@ -258,7 +288,7 @@ export class WorkflowService {
 		 * If a trigger or poller in the workflow was updated, the new value
 		 * will take effect only on removing and re-adding.
 		 */
-		if (workflow.active) {
+		if (wasActive) {
 			await this.activeWorkflowManager.remove(workflowId);
 		}
 
@@ -278,7 +308,7 @@ export class WorkflowService {
 			}
 		}
 
-		if (workflowSettings.executionTimeout === config.get('executions.timeout')) {
+		if (workflowSettings.executionTimeout === this.globalConfig.executions.timeout) {
 			// Do not save when default got set
 			delete workflowSettings.executionTimeout;
 		}
@@ -298,7 +328,29 @@ export class WorkflowService {
 			'staticData',
 			'pinData',
 			'versionId',
+			'activeVersionId',
+			'description',
 		]);
+
+		// Save the workflow to history first, so we can retrieve the complete version object for the update
+		if (versionChanged) {
+			await this.workflowHistoryService.saveVersion(user, workflowUpdateData, workflowId);
+		}
+
+		if (needsActiveVersionUpdate) {
+			const versionIdToFetch = versionChanged ? workflowUpdateData.versionId : workflow.versionId;
+			const version = await this.workflowHistoryService.getVersion(
+				user,
+				workflowId,
+				versionIdToFetch,
+			);
+
+			updatePayload.activeVersion = WorkflowHelpers.getActiveVersionUpdateValue(
+				workflow,
+				version,
+				isNowActive,
+			);
+		}
 
 		if (parentFolderId) {
 			const project = await this.sharedWorkflowRepository.getWorkflowOwningProject(workflow.id);
@@ -321,10 +373,6 @@ export class WorkflowService {
 
 		if (tagIds && !tagsDisabled) {
 			await this.workflowTagMappingRepository.overwriteTaggings(workflowId, tagIds);
-		}
-
-		if (workflowUpdateData.versionId !== workflow.versionId) {
-			await this.workflowHistoryService.saveVersion(user, workflowUpdateData, workflowId);
 		}
 
 		const relations = tagsDisabled ? [] : ['tags'];
@@ -355,21 +403,50 @@ export class WorkflowService {
 			publicApi: false,
 		});
 
-		if (updatedWorkflow.active) {
+		if (activationStatusChanged && isNowActive) {
+			// Workflow is being activated
+			this.eventService.emit('workflow-activated', {
+				user,
+				workflowId,
+				workflow: updatedWorkflow,
+				publicApi: false,
+			});
+		} else if (activationStatusChanged && !isNowActive) {
+			// Workflow is being deactivated
+			this.eventService.emit('workflow-deactivated', {
+				user,
+				workflowId,
+				workflow: updatedWorkflow,
+				publicApi: false,
+			});
+		}
+
+		if (isNowActive) {
 			// When the workflow is supposed to be active add it again
 			try {
 				await this.externalHooks.run('workflow.activate', [updatedWorkflow]);
-				await this.activeWorkflowManager.add(workflowId, workflow.active ? 'update' : 'activate');
+				await this.activeWorkflowManager.add(workflowId, wasActive ? 'update' : 'activate');
 			} catch (error) {
 				// If workflow could not be activated set it again to inactive
-				// and revert the versionId change so UI remains consistent
+				// and revert the versionId and activeVersionId change so UI remains consistent
 				await this.workflowRepository.update(workflowId, {
 					active: false,
+					activeVersion: null,
 					versionId: workflow.versionId,
 				});
 
 				// Also set it in the returned data
 				updatedWorkflow.active = false;
+				updatedWorkflow.activeVersionId = null;
+				updatedWorkflow.activeVersion = null;
+
+				// Emit deactivation event since activation failed
+				this.eventService.emit('workflow-deactivated', {
+					user,
+					workflowId,
+					workflow: updatedWorkflow,
+					publicApi: false,
+				});
 
 				let message;
 				if (error instanceof NodeApiError) message = error.description;
@@ -415,7 +492,9 @@ export class WorkflowService {
 				select: ['id'],
 				where: { workflowId },
 			})
-			.then((rows) => rows.map(({ id: executionId }) => ({ workflowId, executionId })));
+			.then((rows) =>
+				rows.map(({ id: executionId }) => FileLocation.ofExecution(workflowId, executionId)),
+			);
 
 		await this.workflowRepository.delete(workflowId);
 		await this.binaryDataService.deleteMany(idsForDeletion);
@@ -447,23 +526,28 @@ export class WorkflowService {
 			throw new BadRequestError('Workflow is already archived.');
 		}
 
-		if (workflow.active) {
+		if (workflow.activeVersionId !== null) {
 			await this.activeWorkflowManager.remove(workflowId);
 		}
 
 		const versionId = uuid();
+		workflow.versionId = versionId;
+		workflow.isArchived = true;
+		workflow.active = false;
+		workflow.activeVersionId = null;
+		workflow.activeVersion = null;
+
 		await this.workflowRepository.update(workflowId, {
 			isArchived: true,
 			active: false,
+			activeVersion: null,
 			versionId,
 		});
 
+		await this.workflowHistoryService.saveVersion(user, workflow, workflowId);
+
 		this.eventService.emit('workflow-archived', { user, workflowId, publicApi: false });
 		await this.externalHooks.run('workflow.afterArchive', [workflowId]);
-
-		workflow.isArchived = true;
-		workflow.active = false;
-		workflow.versionId = versionId;
 
 		return workflow;
 	}
@@ -482,13 +566,15 @@ export class WorkflowService {
 		}
 
 		const versionId = uuid();
+		workflow.versionId = versionId;
+		workflow.isArchived = false;
+
 		await this.workflowRepository.update(workflowId, { isArchived: false, versionId });
+
+		await this.workflowHistoryService.saveVersion(user, workflow, workflowId);
 
 		this.eventService.emit('workflow-unarchived', { user, workflowId, publicApi: false });
 		await this.externalHooks.run('workflow.afterUnarchive', [workflowId]);
-
-		workflow.isArchived = false;
-		workflow.versionId = versionId;
 
 		return workflow;
 	}
@@ -558,8 +644,11 @@ export class WorkflowService {
 		);
 	}
 
-	async getWorkflowsWithNodesIncluded(user: User, nodeTypes: string[]) {
-		const foundWorkflows = await this.workflowRepository.findWorkflowsWithNodeType(nodeTypes);
+	async getWorkflowsWithNodesIncluded(user: User, nodeTypes: string[], includeNodes = false) {
+		const foundWorkflows = await this.workflowRepository.findWorkflowsWithNodeType(
+			nodeTypes,
+			includeNodes,
+		);
 
 		let { workflows } = await this.workflowRepository.getManyAndCount(
 			foundWorkflows.map((w) => w.id),
@@ -569,13 +658,16 @@ export class WorkflowService {
 			workflows = await this.processSharedWorkflows(workflows);
 		}
 
-		workflows = await this.addUserScopes(workflows, user);
+		const withScopes = await this.addUserScopes(workflows, user);
 
-		this.cleanupSharedField(workflows);
+		this.cleanupSharedField(withScopes);
 
-		return workflows.map((workflow) => ({
-			resourceType: 'workflow',
-			...workflow,
-		}));
+		return withScopes.map((workflow) => {
+			const nodes = includeNodes
+				? (foundWorkflows.find((w) => w.id === workflow.id)?.nodes ?? [])
+				: undefined;
+
+			return { resourceType: 'workflow', ...workflow, ...(includeNodes ? { nodes } : {}) };
+		});
 	}
 }

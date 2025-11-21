@@ -16,7 +16,7 @@ export type UserLike = {
 	email?: string;
 	firstName?: string;
 	lastName?: string;
-	role: {
+	role?: {
 		slug: string;
 	};
 };
@@ -61,6 +61,7 @@ export type RelayEventMap = {
 		publicApi: boolean;
 		projectId: string;
 		projectType: string;
+		uiContext?: string;
 	};
 
 	'workflow-deleted': {
@@ -83,6 +84,20 @@ export type RelayEventMap = {
 
 	'workflow-saved': {
 		user: UserLike;
+		workflow: IWorkflowDb;
+		publicApi: boolean;
+	};
+
+	'workflow-activated': {
+		user: UserLike;
+		workflowId: string;
+		workflow: IWorkflowDb;
+		publicApi: boolean;
+	};
+
+	'workflow-deactivated': {
+		user: UserLike;
+		workflowId: string;
 		workflow: IWorkflowDb;
 		publicApi: boolean;
 	};
@@ -205,6 +220,11 @@ export type RelayEventMap = {
 		publicApi: boolean;
 	};
 
+	'user-retried-execution': {
+		userId: string;
+		publicApi: boolean;
+	};
+
 	'user-retrieved-workflow': {
 		userId: string;
 		publicApi: boolean;
@@ -292,6 +312,7 @@ export type RelayEventMap = {
 		publicApi: boolean;
 		projectId?: string;
 		projectType?: string;
+		uiContext?: string;
 	};
 
 	'credentials-shared': {
@@ -363,6 +384,10 @@ export type RelayEventMap = {
 		executionId: string;
 	};
 
+	'execution-cancelled': {
+		executionId: string;
+	};
+
 	// #endregion
 
 	// #region Project
@@ -385,6 +410,7 @@ export type RelayEventMap = {
 	'team-project-created': {
 		userId: string;
 		role: string;
+		uiContext?: string;
 	};
 
 	// #endregion
@@ -396,6 +422,7 @@ export type RelayEventMap = {
 		readOnlyInstance: boolean;
 		repoType: 'github' | 'gitlab' | 'other';
 		connected: boolean;
+		connectionType: 'ssh' | 'https';
 	};
 
 	'source-control-user-started-pull-ui': {
@@ -450,7 +477,13 @@ export type RelayEventMap = {
 
 	// #region Variable
 
-	'variable-created': {};
+	'variable-created': {
+		projectId?: string;
+	};
+
+	'variable-updated': {
+		projectId?: string;
+	};
 
 	// #endregion
 
