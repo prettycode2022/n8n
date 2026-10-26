@@ -1,3 +1,4 @@
+import type { IExecutionContext } from './execution-context';
 import type {
 	IRunData,
 	IPinData,
@@ -8,16 +9,24 @@ import type {
 	IWaitingForExecutionSource,
 	StartNodeData,
 	ExecutionError,
+	RelatedAgentRun,
 	RelatedExecution,
 	INode,
 } from './interfaces';
 import type { IRunExecutionData } from './run-execution-data/run-execution-data';
+import type {
+	IRunExecutionDataV1,
+	RedactionInfo,
+} from './run-execution-data/run-execution-data.v1';
+import { generateSecureToken } from './utils';
 
 export interface CreateFullRunExecutionDataOptions {
 	startData?: {
 		startNodes?: StartNodeData[];
-		destinationNode?: string;
-		originalDestinationNode?: string;
+		destinationNode?: NonNullable<IRunExecutionData['startData']>['destinationNode'];
+		originalDestinationNode?: NonNullable<
+			IRunExecutionData['startData']
+		>['originalDestinationNode'];
 		runNodeFilter?: string[];
 	};
 	resultData?: {
@@ -33,12 +42,43 @@ export interface CreateFullRunExecutionDataOptions {
 		metadata?: Record<string, ITaskMetadata[]>;
 		waitingExecution?: IWaitingForExecution;
 		waitingExecutionSource?: IWaitingForExecutionSource | null;
+		runtimeData?: IExecutionContext;
 	} | null;
 	parentExecution?: RelatedExecution;
-	validateSignature?: boolean;
+	subWorkflowOutput?: IRunExecutionData['subWorkflowOutput'];
+	parentAgentRun?: RelatedAgentRun;
+	resumeToken?: string;
 	waitTill?: Date;
 	manualData?: IRunExecutionData['manualData'];
 	pushRef?: IRunExecutionData['pushRef'];
+	redactionInfo?: RedactionInfo;
+}
+
+function buildResultData(
+	resultData: CreateFullRunExecutionDataOptions['resultData'],
+): IRunExecutionDataV1['resultData'] {
+	return {
+		error: resultData?.error,
+		// @ts-expect-error CAT-752
+		runData: resultData?.runData === null ? undefined : (resultData?.runData ?? {}),
+		pinData: resultData?.pinData,
+		lastNodeExecuted: resultData?.lastNodeExecuted,
+		metadata: resultData?.metadata,
+	};
+}
+
+function buildExecutionData(
+	executionData: CreateFullRunExecutionDataOptions['executionData'],
+): IRunExecutionDataV1['executionData'] {
+	if (executionData === null) return undefined;
+	return {
+		contextData: executionData?.contextData ?? {},
+		nodeExecutionStack: executionData?.nodeExecutionStack ?? [],
+		metadata: executionData?.metadata ?? {},
+		waitingExecution: executionData?.waitingExecution ?? {},
+		waitingExecutionSource: executionData?.waitingExecutionSource ?? {},
+		runtimeData: executionData?.runtimeData,
+	};
 }
 
 /**
@@ -49,35 +89,20 @@ export interface CreateFullRunExecutionDataOptions {
 export function createRunExecutionData(
 	options: CreateFullRunExecutionDataOptions = {},
 ): IRunExecutionData {
-	const runExecutionData: IRunExecutionData = {
+	return {
+		version: 1,
 		startData: options.startData ?? {},
-		resultData: {
-			error: options.resultData?.error,
-			// @ts-expect-error CAT-752
-			runData:
-				options.resultData?.runData === null ? undefined : (options.resultData?.runData ?? {}),
-			pinData: options.resultData?.pinData,
-			lastNodeExecuted: options.resultData?.lastNodeExecuted,
-			metadata: options.resultData?.metadata,
-		},
-		executionData:
-			options.executionData === null
-				? undefined
-				: {
-						contextData: options.executionData?.contextData ?? {},
-						nodeExecutionStack: options.executionData?.nodeExecutionStack ?? [],
-						metadata: options.executionData?.metadata ?? {},
-						waitingExecution: options.executionData?.waitingExecution ?? {},
-						waitingExecutionSource: options.executionData?.waitingExecutionSource ?? {},
-					},
+		resultData: buildResultData(options.resultData),
+		executionData: buildExecutionData(options.executionData),
 		parentExecution: options.parentExecution,
-		validateSignature: options.validateSignature,
+		subWorkflowOutput: options.subWorkflowOutput,
+		parentAgentRun: options.parentAgentRun,
+		resumeToken: options.resumeToken ?? generateSecureToken(),
 		waitTill: options.waitTill,
 		manualData: options.manualData,
 		pushRef: options.pushRef,
-	};
-
-	return runExecutionData;
+		redactionInfo: options.redactionInfo,
+	} satisfies IRunExecutionDataV1 as unknown as IRunExecutionData; // NOTE: we cast to unknown to avoid manual construction of branded type.
 }
 
 /**
@@ -87,10 +112,11 @@ export function createRunExecutionData(
  */
 export function createEmptyRunExecutionData(): IRunExecutionData {
 	return {
+		version: 1,
 		resultData: {
 			runData: {},
 		},
-	};
+	} satisfies IRunExecutionDataV1 as unknown as IRunExecutionData; // NOTE: we cast to unknown to avoid manual construction of branded type.
 }
 
 /**
@@ -103,8 +129,12 @@ export function createEmptyRunExecutionData(): IRunExecutionData {
  */
 export function createErrorExecutionData(node: INode, error: ExecutionError): IRunExecutionData {
 	return {
+		version: 1,
 		startData: {
-			destinationNode: node.name,
+			destinationNode: {
+				nodeName: node.name,
+				mode: 'inclusive',
+			},
 			runNodeFilter: [node.name],
 		},
 		executionData: {
@@ -146,5 +176,5 @@ export function createErrorExecutionData(node: INode, error: ExecutionError): IR
 			error,
 			lastNodeExecuted: node.name,
 		},
-	};
+	} satisfies IRunExecutionDataV1 as unknown as IRunExecutionData; // NOTE: we cast to unknown to avoid manual construction of branded type.
 }

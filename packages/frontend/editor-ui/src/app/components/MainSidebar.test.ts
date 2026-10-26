@@ -2,27 +2,40 @@ import { reactive } from 'vue';
 import { createComponentRenderer } from '@/__tests__/render';
 import { createTestingPinia } from '@pinia/testing';
 import { type MockedStore, mockedStore } from '@/__tests__/utils';
-import { defaultSettings } from '@/__tests__/defaults';
+import { defaultSettings } from '@n8n/frontend-test-utils';
 import MainSidebar from '@/app/components/MainSidebar.vue';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { useUIStore } from '@/app/stores/ui.store';
-import { useSourceControlStore } from '@/features/integrations/sourceControl.ee/sourceControl.store';
-import { useVersionsStore } from '@/app/stores/versions.store';
-import { useUsersStore } from '@/features/settings/users/users.store';
+import { useVersionsStore } from '@n8n/stores/versions.store';
+import { useUsersStore } from '@n8n/stores/users.store';
+import { useTemplatesStore } from '@/features/workflows/templates/templates.store';
+import { usePersonalizedTemplatesV2Store } from '@/experiments/templateRecoV2/stores/templateRecoV2.store';
+import { usePersonalizedTemplatesV3Store } from '@/experiments/personalizedTemplatesV3/stores/personalizedTemplatesV3.store';
 import type { Version } from '@n8n/rest-api-client/api/versions';
+import { ABOUT_MODAL_KEY, WHATS_NEW_MODAL_KEY } from '@/app/constants';
+
+const openTopUpMock = vi.hoisted(() => vi.fn());
 
 vi.mock('vue-router', () => ({
-	useRouter: () => ({}),
-	useRoute: () => reactive({}),
+	useRouter: () => ({
+		resolve: vi.fn(() => ({ meta: {} })),
+	}),
+	useRoute: () => reactive({ params: {} }),
 	RouterLink: vi.fn(),
+}));
+
+vi.mock('@/app/composables/useAiGatewayTopUp', () => ({
+	useAiGatewayTopUp: () => ({ openTopUp: openTopUpMock }),
 }));
 
 let renderComponent: ReturnType<typeof createComponentRenderer>;
 let settingsStore: MockedStore<typeof useSettingsStore>;
 let uiStore: MockedStore<typeof useUIStore>;
-let sourceControlStore: MockedStore<typeof useSourceControlStore>;
 let versionsStore: MockedStore<typeof useVersionsStore>;
 let usersStore: MockedStore<typeof useUsersStore>;
+let templatesStore: MockedStore<typeof useTemplatesStore>;
+let personalizedTemplatesV2Store: MockedStore<typeof usePersonalizedTemplatesV2Store>;
+let personalizedTemplatesV3Store: MockedStore<typeof usePersonalizedTemplatesV3Store>;
 
 const mockVersion: Version = {
 	name: '1.2.0',
@@ -38,14 +51,17 @@ const mockVersion: Version = {
 
 describe('MainSidebar', () => {
 	beforeEach(() => {
+		openTopUpMock.mockReset();
 		renderComponent = createComponentRenderer(MainSidebar, {
 			pinia: createTestingPinia(),
 		});
 		settingsStore = mockedStore(useSettingsStore);
 		uiStore = mockedStore(useUIStore);
-		sourceControlStore = mockedStore(useSourceControlStore);
 		versionsStore = mockedStore(useVersionsStore);
 		usersStore = mockedStore(useUsersStore);
+		templatesStore = mockedStore(useTemplatesStore);
+		personalizedTemplatesV2Store = mockedStore(usePersonalizedTemplatesV2Store);
+		personalizedTemplatesV3Store = mockedStore(usePersonalizedTemplatesV3Store);
 
 		settingsStore.settings = defaultSettings;
 
@@ -54,28 +70,18 @@ describe('MainSidebar', () => {
 		versionsStore.nextVersions = [];
 		usersStore.canUserUpdateVersion = true;
 		uiStore.sidebarMenuCollapsed = false;
+		settingsStore.isTemplatesEnabled = true;
+		templatesStore.hasCustomTemplatesHost = false;
+		templatesStore.websiteTemplateRepositoryURL = 'https://n8n.io/workflows';
+
+		// Default experiment store values
+		personalizedTemplatesV2Store.isFeatureEnabled = vi.fn(() => false);
+		personalizedTemplatesV3Store.isFeatureEnabled = vi.fn(() => false);
 	});
 
 	it('renders the sidebar without error', () => {
 		expect(() => renderComponent()).not.toThrow();
 	});
-
-	test.each([
-		[false, true, true],
-		[true, false, false],
-		[true, true, false],
-		[false, false, false],
-	])(
-		'should render readonly tooltip when is opened %s and the environment is readonly %s',
-		(sidebarMenuCollapsed, branchReadOnly, shouldRender) => {
-			uiStore.sidebarMenuCollapsed = sidebarMenuCollapsed;
-			sourceControlStore.preferences.branchReadOnly = branchReadOnly;
-
-			const { queryByTestId } = renderComponent();
-
-			expect(queryByTestId('read-only-env-icon') !== null).toBe(shouldRender);
-		},
-	);
 
 	describe('Version Update CTA', () => {
 		it('should not render version update CTA when hasVersionUpdates is false', () => {
@@ -87,18 +93,16 @@ describe('MainSidebar', () => {
 			expect(queryByTestId('version-update-cta-button')).not.toBeInTheDocument();
 		});
 
-		it('should render version update CTA disabled when canUserUpdateVersion is false', async () => {
+		it('should not render version update CTA when canUserUpdateVersion is false', async () => {
 			versionsStore.hasVersionUpdates = true;
 			versionsStore.nextVersions = [mockVersion];
 			usersStore.canUserUpdateVersion = false;
 
-			const { findByTestId, getByText } = renderComponent();
+			const { queryByTestId, getByText } = renderComponent();
 
-			getByText('What’s New').click();
+			getByText('Help').click();
 
-			const updateButton = await findByTestId('version-update-cta-button');
-			expect(updateButton).toBeInTheDocument();
-			expect(updateButton).toBeDisabled();
+			expect(queryByTestId('version-update-cta-button')).not.toBeInTheDocument();
 		});
 
 		it('should render version update CTA enabled when canUserUpdateVersion is true and hasVersionUpdates is true', async () => {
@@ -108,11 +112,146 @@ describe('MainSidebar', () => {
 
 			const { getByText, findByTestId } = renderComponent();
 
-			getByText('What’s New').click();
+			getByText('Help').click();
 
 			const updateButton = await findByTestId('version-update-cta-button');
 			expect(updateButton).toBeInTheDocument();
 			expect(updateButton).toBeEnabled();
+		});
+	});
+
+	describe('mainMenuItems', () => {
+		it('should show templates menu when templates are enabled and no experiment is active', () => {
+			settingsStore.isTemplatesEnabled = true;
+			templatesStore.hasCustomTemplatesHost = false;
+			personalizedTemplatesV2Store.isFeatureEnabled = vi.fn(() => false);
+			personalizedTemplatesV3Store.isFeatureEnabled = vi.fn(() => false);
+
+			const { getAllByTestId } = renderComponent();
+
+			// Should have at least one templates item visible
+			const templatesItems = getAllByTestId('main-sidebar-templates');
+			expect(templatesItems.length).toBeGreaterThan(0);
+		});
+
+		it('should show templates menu when experiment is enabled', () => {
+			settingsStore.isTemplatesEnabled = true;
+			personalizedTemplatesV3Store.isFeatureEnabled = vi.fn(() => true);
+			personalizedTemplatesV2Store.isFeatureEnabled = vi.fn(() => false);
+
+			const { getAllByTestId } = renderComponent();
+
+			// Should have templates item visible when experiment is enabled
+			const templatesItems = getAllByTestId('main-sidebar-templates');
+			expect(templatesItems.length).toBeGreaterThan(0);
+		});
+
+		it('should not show templates menu when templates are disabled', () => {
+			settingsStore.isTemplatesEnabled = false;
+
+			const { queryAllByTestId } = renderComponent();
+
+			// Should have no templates items when templates are disabled
+			const templatesItems = queryAllByTestId('main-sidebar-templates');
+			expect(templatesItems).toHaveLength(0);
+		});
+
+		it('should show help menu item', () => {
+			const { getByTestId } = renderComponent();
+
+			expect(getByTestId('main-sidebar-help')).toBeInTheDocument();
+		});
+
+		it('should show settings menu item', () => {
+			const { getByTestId } = renderComponent();
+
+			expect(getByTestId('main-sidebar-settings')).toBeInTheDocument();
+		});
+
+		it('should show contact support item in help menu when on cloud deployment', async () => {
+			settingsStore.isCloudDeployment = true;
+
+			const { getByText, findByText } = renderComponent();
+
+			getByText('Help').click();
+
+			expect(await findByText('Contact Support')).toBeInTheDocument();
+		});
+
+		it('should not show contact support item in help menu when not on cloud deployment', async () => {
+			settingsStore.isCloudDeployment = false;
+
+			const { getByText, findByRole, queryByText } = renderComponent();
+
+			getByText('Help').click();
+			// Wait for the popover to mount before checking
+			await findByRole('dialog');
+
+			expect(queryByText('Contact Support')).not.toBeInTheDocument();
+		});
+	});
+
+	describe('handleSelect', () => {
+		beforeEach(() => {
+			uiStore.openModal = vi.fn();
+			uiStore.openModalWithData = vi.fn();
+			personalizedTemplatesV3Store.markTemplateRecommendationInteraction = vi.fn();
+		});
+
+		it('should open about modal when about is selected', async () => {
+			const { getByText, findByText } = renderComponent();
+
+			getByText('Help').click();
+			const aboutItem = await findByText('About n8n');
+			aboutItem.click();
+
+			expect(uiStore.openModal).toHaveBeenCalledWith(ABOUT_MODAL_KEY);
+		});
+
+		it('should open whats new modal when whats new article is selected', async () => {
+			versionsStore.hasVersionUpdates = true;
+			versionsStore.whatsNewArticles = [
+				{
+					id: 123,
+					title: 'Test Article',
+					content: 'Test content',
+					createdAt: '2025-01-01T00:00:00Z',
+					updatedAt: null,
+					publishedAt: '2025-01-01T00:00:00Z',
+				},
+			];
+
+			const { getByText, findByText } = renderComponent();
+
+			getByText('Help').click();
+			const articleItem = await findByText('Test Article');
+			articleItem.click();
+
+			expect(uiStore.openModalWithData).toHaveBeenCalledWith({
+				name: WHATS_NEW_MODAL_KEY,
+				data: {
+					articleId: 123,
+				},
+			});
+		});
+
+		it('should open the top-up flow when n8n credits is selected', async () => {
+			settingsStore.settings = {
+				...defaultSettings,
+				aiGateway: {
+					enabled: true,
+					budget: 0,
+					cloudUbbEnabled: true,
+				},
+			};
+
+			const { getByText, findByText } = renderComponent();
+
+			getByText('Settings').click();
+			const creditsItem = await findByText('Gateway credits');
+			creditsItem.click();
+
+			expect(openTopUpMock).toHaveBeenCalledWith({ source: 'settings_page' });
 		});
 	});
 });

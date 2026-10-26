@@ -4,7 +4,15 @@ import { DataSource, DataSourceOptions, EntityManager } from '@n8n/typeorm';
 import { UnexpectedError } from 'n8n-workflow';
 
 import { DataTableColumn } from './data-table-column.entity';
-import { addColumnQuery, deleteColumnQuery, toDslColumns, toTableName } from './utils/sql-utils';
+import {
+	addColumnQuery,
+	deleteColumnQuery,
+	isValidDataTableId,
+	renameColumnQuery,
+	renameTableQuery,
+	toDslColumns,
+	toTableName,
+} from './utils/sql-utils';
 
 /**
  * Manages database schema operations for data tables (DDL).
@@ -19,6 +27,7 @@ export class DataTableDDLService {
 		columns: DataTableColumn[],
 		trx?: EntityManager,
 	) {
+		// oxlint-disable-next-line typescript/no-deprecated
 		await withTransaction(this.dataSource.manager, trx, async (em) => {
 			if (!em.queryRunner) {
 				throw new UnexpectedError('QueryRunner is not available');
@@ -34,11 +43,41 @@ export class DataTableDDLService {
 	}
 
 	async dropTable(dataTableId: string, trx?: EntityManager) {
+		// oxlint-disable-next-line typescript/no-deprecated
 		await withTransaction(this.dataSource.manager, trx, async (em) => {
 			if (!em.queryRunner) {
 				throw new UnexpectedError('QueryRunner is not available');
 			}
 			await em.queryRunner.dropTable(toTableName(dataTableId), true);
+		});
+	}
+
+	async renameTable(
+		oldDataTableId: string,
+		newDataTableId: string,
+		dbType: DataSourceOptions['type'],
+		trx?: EntityManager,
+	) {
+		// These ids come from git files and the local DB rather than validated
+		// API requests, so guard before deriving SQL identifiers from them
+		if (!isValidDataTableId(oldDataTableId) || !isValidDataTableId(newDataTableId)) {
+			throw new UnexpectedError('Invalid data table ID');
+		}
+		// oxlint-disable-next-line typescript/no-deprecated
+		await withTransaction(this.dataSource.manager, trx, async (em) => {
+			await em.query(
+				renameTableQuery(toTableName(oldDataTableId), toTableName(newDataTableId), dbType),
+			);
+		});
+	}
+
+	async tableExists(dataTableId: string, trx?: EntityManager): Promise<boolean> {
+		// oxlint-disable-next-line typescript/no-deprecated
+		return await withTransaction(this.dataSource.manager, trx, async (em) => {
+			if (!em.queryRunner) {
+				throw new UnexpectedError('QueryRunner is not available');
+			}
+			return await em.queryRunner.hasTable(toTableName(dataTableId));
 		});
 	}
 
@@ -48,6 +87,7 @@ export class DataTableDDLService {
 		dbType: DataSourceOptions['type'],
 		trx?: EntityManager,
 	) {
+		// oxlint-disable-next-line typescript/no-deprecated
 		await withTransaction(this.dataSource.manager, trx, async (em) => {
 			await em.query(addColumnQuery(toTableName(dataTableId), column, dbType));
 		});
@@ -59,8 +99,24 @@ export class DataTableDDLService {
 		dbType: DataSourceOptions['type'],
 		trx?: EntityManager,
 	) {
+		// oxlint-disable-next-line typescript/no-deprecated
 		await withTransaction(this.dataSource.manager, trx, async (em) => {
 			await em.query(deleteColumnQuery(toTableName(dataTableId), columnName, dbType));
+		});
+	}
+
+	async renameColumn(
+		dataTableId: string,
+		oldColumnName: string,
+		newColumnName: string,
+		dbType: DataSourceOptions['type'],
+		trx?: EntityManager,
+	) {
+		// oxlint-disable-next-line typescript/no-deprecated
+		await withTransaction(this.dataSource.manager, trx, async (em) => {
+			await em.query(
+				renameColumnQuery(toTableName(dataTableId), oldColumnName, newColumnName, dbType),
+			);
 		});
 	}
 }
